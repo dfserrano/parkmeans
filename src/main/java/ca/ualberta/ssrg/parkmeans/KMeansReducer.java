@@ -1,55 +1,64 @@
 package ca.ualberta.ssrg.parkmeans;
 
+import java.io.BufferedWriter;
 import java.io.IOException;
+import java.io.OutputStreamWriter;
+import java.util.Collections;
 import java.util.LinkedList;
 import java.util.List;
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.io.IntWritable;
-import org.apache.hadoop.io.SequenceFile;
+import org.apache.hadoop.io.LongWritable;
+import org.apache.hadoop.io.Text;
 import org.apache.hadoop.mapreduce.Reducer;
 
-import ca.ualberta.ssrg.parkmeans.model.ClusterCenter;
-import ca.ualberta.ssrg.parkmeans.model.Vector;
-
-public class KMeansReducer extends
-		Reducer<ClusterCenter, Vector, ClusterCenter, Vector> {
+public class KMeansReducer extends Reducer<Text, Text, LongWritable, Text> {
 
 	public static enum Counter {
 		CONVERGED
 	}
 
-	List<ClusterCenter> centers = new LinkedList<ClusterCenter>();
+	private static final Log LOG = LogFactory.getLog(KMeansReducer.class);
+	List<String> centers = new LinkedList<String>();
 
 	@Override
-	protected void reduce(ClusterCenter key, Iterable<Vector> values,
-			Context context) throws IOException, InterruptedException {
+	protected void reduce(Text key, Iterable<Text> values, Context context)
+			throws IOException, InterruptedException {
 
-		Vector newCenter = new Vector();
-		List<Vector> vectorList = new LinkedList<Vector>();
-		int vectorSize = key.getCenter().getVector().length;
-		newCenter.setVector(new double[vectorSize]);
-		for (Vector value : values) {
-			vectorList.add(new Vector(value));
-			for (int i = 0; i < value.getVector().length; i++) {
-				newCenter.getVector()[i] += value.getVector()[i];
+		List<String> vectorList = new LinkedList<String>();
+
+		List<Double> center = KMeansMapper.fromStringToVector(key.toString());
+		int vectorSize = center.size();
+		List<Double> newCenter = new LinkedList<Double>(Collections.nCopies(
+				vectorSize, 0d));
+
+		for (Text value : values) {
+			List<Double> vector = KMeansMapper.fromStringToVector(value
+					.toString());
+			vectorList.add(value.toString());
+
+			for (int i = 0; i < vector.size(); i++) {
+				newCenter.set(i, newCenter.get(i) + vector.get(i));
 			}
 		}
 
-		for (int i = 0; i < newCenter.getVector().length; i++) {
-			newCenter.getVector()[i] = newCenter.getVector()[i]
-					/ vectorList.size();
+		for (int i = 0; i < newCenter.size(); i++) {
+			newCenter.set(i, newCenter.get(i) / vectorList.size());
 		}
 
-		ClusterCenter center = new ClusterCenter(newCenter);
-		centers.add(center);
-		for (Vector vector : vectorList) {
-			context.write(center, vector);
+		String newCenterString = KMeansMapper.fromVectorToString(newCenter);
+		centers.add(newCenterString);
+		LongWritable lw = new LongWritable(0);
+		for (String v : vectorList) {
+			LOG.info("REDUCE EMIT " + newCenterString + ":" + v);
+			context.write(lw, new Text(newCenterString + ":" + v));
 		}
 
-		if (center.converged(key))
+		if (areDifferent(center, newCenter))
 			context.getCounter(Counter.CONVERGED).increment(1);
 
 	}
@@ -58,17 +67,32 @@ public class KMeansReducer extends
 	protected void cleanup(Context context) throws IOException,
 			InterruptedException {
 		super.cleanup(context);
+
 		Configuration conf = context.getConfiguration();
 		Path outPath = new Path(conf.get("centroid.path"));
+
 		FileSystem fs = FileSystem.get(conf);
 		fs.delete(outPath, true);
-		final SequenceFile.Writer out = SequenceFile.createWriter(fs,
-				context.getConfiguration(), outPath, ClusterCenter.class,
-				IntWritable.class);
-		final IntWritable value = new IntWritable(0);
-		for (ClusterCenter center : centers) {
-			out.append(center, value);
+
+		BufferedWriter bw = new BufferedWriter(new OutputStreamWriter(
+				fs.create(outPath, true)));
+
+		for (String center : centers) {
+			bw.write(center + "\n");
 		}
-		out.close();
+		bw.close();
+	}
+
+	public boolean areDifferent(List<Double> a, List<Double> b) {
+		if (a.size() != b.size())
+			return true;
+
+		for (int i = 0; i < a.size(); i++) {
+			if (!a.get(i).equals(b.get(i))) {
+				return true;
+			}
+		}
+
+		return false;
 	}
 }
